@@ -681,3 +681,15 @@ procdump(void)
     printf("\n");
   }
 }
+
+void
+dumpSchedulerStats(void)
+{
+  printf("dumping sched stats\n");
+}
+
+void
+setTickets(int numTickets)
+{
+  printf("set tickets to %d\n", numTickets);
+}
