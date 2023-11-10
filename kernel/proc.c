@@ -124,6 +124,10 @@ allocproc(void)
 found:
   p->pid = allocpid();
   p->state = USED;
+  p->ticks = 0;
+  p->tickets = 10000;
+  p->stride = K / p->tickets;
+  p->pass = p->stride;
 
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
@@ -169,6 +173,10 @@ freeproc(struct proc *p)
   p->killed = 0;
   p->xstate = 0;
   p->state = UNUSED;
+  p->ticks = 0;
+  p->tickets = 0;
+  p->stride = 0;
+  p->pass = 0;
 }
 
 // Create a user page table for a given process, with no user memory,
@@ -434,6 +442,31 @@ wait(uint64 addr)
   }
 }
 
+unsigned short
+getTotalTickets()
+{
+  struct proc *p;
+  unsigned short totalTickets = 0;
+
+  for (p = proc; p < &proc[NPROC]; p++)
+  {
+    if (p->state == RUNNABLE)
+    {
+      totalTickets += p->tickets;
+    }
+  }
+
+  return totalTickets;
+}
+
+unsigned short lfsr = 0xACE1u;
+unsigned short bit;
+unsigned short rand()
+{
+bit = ((lfsr >> 0) ^ (lfsr >> 2) ^ (lfsr >> 3) ^ (lfsr >> 5)) & 1;
+return lfsr = (lfsr >> 1) | (bit << 15);
+}
+
 // Per-CPU process scheduler.
 // Each CPU calls scheduler() after setting itself up.
 // Scheduler never returns.  It loops, doing:
@@ -451,23 +484,84 @@ scheduler(void)
   for(;;){
     // Avoid deadlock by ensuring that devices can interrupt.
     intr_on();
+    #if defined(LOTTERY)
+      unsigned short totalTickets;
+      totalTickets = getTotalTickets();
+      unsigned short lotteryPick = rand() % totalTickets;
+      unsigned short currTicketSum = 0;
 
-    for(p = proc; p < &proc[NPROC]; p++) {
-      acquire(&p->lock);
-      if(p->state == RUNNABLE) {
-        // Switch to chosen process.  It is the process's job
-        // to release its lock and then reacquire it
-        // before jumping back to us.
-        p->state = RUNNING;
-        c->proc = p;
-        swtch(&c->context, &p->context);
+      for (p = proc; p < &proc[NPROC]; p++)
+      {
+        acquire(&p->lock);
+        if (p->state == RUNNABLE)
+        {
+          // check if this process won the lottery
+          if ((currTicketSum < lotteryPick)
+          & (currTicketSum + p->tickets > lotteryPick))
+          {
+            p->state = RUNNING;
+            p->ticks++;
+            c->proc = p;
+            swtch(&c->context, &p->context);
 
-        // Process is done running for now.
-        // It should have changed its p->state before coming back.
-        c->proc = 0;
+            c->proc = 0;
+
+          } else currTicketSum += p->tickets;
+        }
+        release(&p->lock);
       }
-      release(&p->lock);
-    }
+
+    #elif defined(STRIDE)
+      struct proc *min_proc = &proc[0];
+      int min_pass = 1000000;
+      for (p = proc; p < &proc[NPROC]; p++)
+      {
+        acquire(&p->lock);
+        if (p->state == RUNNABLE)
+        {
+          if (p->pass < min_pass)
+          {
+            min_pass = p->pass;
+            min_proc = p;
+          }
+        }
+        release(&p->lock);
+      }
+
+      acquire(&min_proc->lock);
+
+      min_proc->state = RUNNING;
+      min_proc->ticks++;
+      c->proc = min_proc;
+      swtch(&c->context, &min_proc->context);
+      c->proc = 0;
+      min_proc->pass = (min_proc->pass+ min_proc->stride);
+
+      release(&min_proc->lock);
+
+
+        
+    #else
+        for (p = proc; p < &proc[NPROC]; p++)
+        {
+          acquire(&p->lock);
+          if (p->state == RUNNABLE)
+          {
+            // Switch to chosen process.  It is the process's job
+            // to release its lock and then reacquire it
+            // before jumping back to us.
+            p->state = RUNNING;
+            p->ticks++;
+            c->proc = p;
+            swtch(&c->context, &p->context);
+
+            // Process is done running for now.
+            // It should have changed its p->state before coming back.
+            c->proc = 0;
+          }
+          release(&p->lock);
+        }
+    #endif
   }
 }
 
@@ -685,11 +779,20 @@ procdump(void)
 void
 dumpSchedulerStats(void)
 {
-  printf("dumping sched stats\n");
+  struct proc *p;
+  for (p = proc; p < &proc[NPROC]; p++) {
+    if (p->state == UNUSED) continue;
+    printf("%d(%s): tickets: %d, ticks: %d\n", p->pid, p->name, p->tickets, p->ticks);
+  }
 }
 
 void
 setTickets(int numTickets)
 {
-  printf("set tickets to %d\n", numTickets);
+  struct proc *p;
+  p = myproc();
+  if (numTickets > 10000) return;
+  p->tickets = numTickets;
+  p->stride = K / numTickets;
+  p->pass = p->stride;
 }
