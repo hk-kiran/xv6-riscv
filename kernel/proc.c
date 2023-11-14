@@ -487,7 +487,7 @@ scheduler(void)
     #if defined(LOTTERY)
       unsigned short totalTickets;
       totalTickets = getTotalTickets();
-      unsigned short lotteryPick = rand() % totalTickets;
+      unsigned short lotteryPick = rand() % (totalTickets + 1);
       unsigned short currTicketSum = 0;
 
       for (p = proc; p < &proc[NPROC]; p++)
@@ -497,15 +497,15 @@ scheduler(void)
         {
           // check if this process won the lottery
           if ((currTicketSum < lotteryPick)
-          & (currTicketSum + p->tickets > lotteryPick))
+          & (currTicketSum + p->tickets >= lotteryPick))
           {
             p->state = RUNNING;
             p->ticks++;
             c->proc = p;
             swtch(&c->context, &p->context);
-
             c->proc = 0;
-
+            release(&p->lock);
+            break;
           } else currTicketSum += p->tickets;
         }
         release(&p->lock);
