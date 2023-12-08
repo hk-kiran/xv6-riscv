@@ -13,6 +13,7 @@ struct proc proc[NPROC];
 struct proc *initproc;
 
 int nextpid = 1;
+
 struct spinlock pid_lock;
 
 extern void forkret(void);
@@ -124,6 +125,8 @@ allocproc(void)
 found:
   p->pid = allocpid();
   p->state = USED;
+  p->thread_id = 0;
+  p->num_threads = 0;
 
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
@@ -158,8 +161,11 @@ freeproc(struct proc *p)
   if(p->trapframe)
     kfree((void*)p->trapframe);
   p->trapframe = 0;
-  if(p->pagetable)
+  if(p->pagetable && p->thread_id == 0)
     proc_freepagetable(p->pagetable, p->sz);
+  else if (p->thread_id != 0) {
+    uvmunmap(p->pagetable, TRAPFRAME - PGSIZE * (p->thread_id), 1, 0);
+  }
   p->pagetable = 0;
   p->sz = 0;
   p->pid = 0;
@@ -169,6 +175,44 @@ freeproc(struct proc *p)
   p->killed = 0;
   p->xstate = 0;
   p->state = UNUSED;
+  p->thread_id = 0;
+  p->num_threads = 0;
+}
+
+static struct proc*
+allocthread(void)
+{
+  struct proc *p;
+
+  for(p = proc; p < &proc[NPROC]; p++) {
+    acquire(&p->lock);
+    if(p->state == UNUSED) {
+      goto found;
+    } else {
+      release(&p->lock);
+    }
+  }
+  return 0;
+
+found:
+  p->pid = allocpid();
+  p->state = USED;
+  p->thread_id = 1; // temp value
+
+  // Allocate a trapframe page.
+  if((p->trapframe = (struct trapframe *)kalloc()) == 0){
+    freeproc(p);
+    release(&p->lock);
+    return 0;
+  }
+
+  // Set up new context to start executing at forkret,
+  // which returns to user space.
+  memset(&p->context, 0, sizeof(p->context));
+  p->context.ra = (uint64)forkret;
+  p->context.sp = p->kstack + PGSIZE;
+
+  return p;
 }
 
 // Create a user page table for a given process, with no user memory,
@@ -680,4 +724,61 @@ procdump(void)
     printf("%d %s %s", p->pid, state, p->name);
     printf("\n");
   }
+}
+
+int
+clone(void* stack) {
+  int i, pid;
+  struct proc *np;
+  struct proc *p = myproc();
+
+  if (stack == 0) {
+    return -1;
+  }
+
+  // Allocate thread.
+  if((np = allocthread()) == 0){
+    return -1;
+  }
+
+  // Use parent's pagetable.
+  np->pagetable = p->pagetable;
+  np->sz = p->sz;
+  acquire(&p->lock);
+  p->num_threads += 1;
+  np->thread_id = p->num_threads;
+  release(&p->lock);
+
+  // copy saved user registers.
+
+  *(np->trapframe) = *(p->trapframe);
+  // Cause fork to return 0 in the child.
+  np->trapframe->a0 = 0;
+
+  np->trapframe->sp = (uint64)(stack + PGSIZE);
+
+  mappages(np->pagetable, TRAPFRAME - (PGSIZE * np->thread_id), PGSIZE,
+           (uint64)(np->trapframe), PTE_R | PTE_W);
+           
+  // increment reference counts on open file descriptors.
+  for(i = 0; i < NOFILE; i++)
+    if(p->ofile[i])
+      np->ofile[i] = filedup(p->ofile[i]);
+  np->cwd = idup(p->cwd);
+
+  safestrcpy(np->name, p->name, sizeof(p->name));
+
+  pid = np->pid;
+
+  release(&np->lock);
+
+  acquire(&wait_lock);
+  np->parent = p;
+  release(&wait_lock);
+
+  acquire(&np->lock);
+  np->state = RUNNABLE;
+  release(&np->lock);
+
+  return pid;
 }
