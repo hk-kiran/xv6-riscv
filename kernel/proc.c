@@ -755,7 +755,7 @@ clone(void* stack) {
   // Cause fork to return 0 in the child.
   np->trapframe->a0 = 0;
 
-  np->trapframe->sp = (uint64)(stack + PGSIZE);
+  np->trapframe->sp = (uint64)(stack);
 
   mappages(np->pagetable, TRAPFRAME - (PGSIZE * np->thread_id), PGSIZE,
            (uint64)(np->trapframe), PTE_R | PTE_W);
